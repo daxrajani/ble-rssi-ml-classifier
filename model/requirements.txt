@@ -1,0 +1,6 @@
+pandas
+numpy
+scikit-learn
+# Only needed for the optional from-scratch TFLite Micro path in
+# training_notebook.ipynb — skip if you're exporting from Edge Impulse.
+tensorflow
