@@ -3,23 +3,28 @@
 Runs on the same nRF52840 DK as `scanner_app`, but adds:
 
 - a windowed-average feature (`src/scanner.c`, `INFERENCE_WINDOW_LEN` samples)
-- a classification hook (`src/inference.c`) — currently a **placeholder
-  threshold heuristic**, not the trained model
+- a real trained classifier (`src/inference.c` + `src/model_weights.c`) -
+  a hand-rolled INT8 dense-layer forward pass over weights extracted from
+  `model/model_int8.tflite`, not TFLite Micro (see the comment at the top
+  of `inference.c` for why: this NCS workspace doesn't have a tflite-micro
+  west module, and the model is small enough that porting the full C++
+  runtime would be a much bigger, riskier change than ~80 lines of
+  quantized matmul)
 - per-bucket LEDs: led0=NEAR, led1=MID, led2=FAR (`src/leds.c`)
 - a BLE GATT service that notifies subscribers with the classification
   result (`src/ble_result_svc.c`)
 - per-inference latency measurement, printed as `RESULT,<mac>,<rssi>,<bucket>,<us>`
+  (measured: 61-91us typical on nRF52840 - see `../../results/accuracy_report.md`)
 
 ## Before you flash this
 
-1. Set `TARGET_BEACON_MAC` in `src/scanner.h` to your beacon's MAC (same
-   one you used with `log_to_csv.py`), or leave it empty to classify
-   whatever device is heard most recently.
-2. Once you've trained a model (Edge Impulse export or
-   `model/training_notebook.ipynb`), replace the body of
-   `classify_distance()` in `src/inference.c` — see the TODO comment there
-   for both integration paths — and wire the exported library into
-   `CMakeLists.txt`.
+1. Set `TARGET_BEACON_MAC` in `src/scanner.h` to your beacon's current MAC
+   (same one you used with `log_to_csv.py` - remember it rotates, so
+   re-check with `--list-devices` if it's stale), or leave it empty to
+   classify whatever device is heard most recently.
+2. After retraining on more data, regenerate `src/model_weights.c` - see
+   `../../model/README.md` for the two-command retrain+extract flow -
+   then rebuild.
 
 ## Build & flash
 

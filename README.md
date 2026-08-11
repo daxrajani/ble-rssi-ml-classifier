@@ -31,32 +31,37 @@ results/
 
 ## Status
 
-Scaffolding and firmware/scripts are written; `dataset/rssi_samples.csv` is
-still empty (header only). Next steps are physical, done by you:
+End-to-end pipeline works on real hardware as of 2026-08-11: flashed to a
+real nRF52840 DK, 850 labeled samples collected from a phone beacon,
+trained to 92% held-out accuracy (single-session split - see caveat
+below), and running live on-device with 61-91us inference latency. See
+`results/accuracy_report.md` for full numbers.
 
-1. **Flash `data_collection/scanner_app`** to the DK (`west build -b
-   nrf52840dk/nrf52840 . -d build && west flash -d build` from that
-   folder). Requires the nRF Connect SDK west workspace you already have at
-   `D:\` — no separate toolchain setup needed.
-2. **Collect data** — walk the beacon (phone, or a second DK/laptop
-   Bluetooth) to 0.5/1/2/3/5m, hold ~30-60s each, multiple rooms/sessions.
-   Use `data_collection/log_to_csv.py --list-devices` first to find the
-   beacon's MAC, then `log_to_csv.py --mac <MAC> --bucket near --session
-   <id>` etc. See `dataset/README.md` for the full checklist.
-   - Note: phones typically rotate their BLE MAC address periodically for
-     privacy, which can fragment a long session. If that's a problem in
-     practice, use a second DK (or laptop) running a fixed-address
-     advertiser as the beacon instead — more reliable for MAC-based
-     filtering.
-3. **Train** — upload `dataset/rssi_samples.csv` to Edge Impulse (primary
-   path) or run `model/training_notebook.ipynb` locally (alternative,
-   more control). See `model/README.md`.
-4. **Integrate** — wire the exported model into
-   `firmware/inference_app/src/inference.c` (TODO comment marks the exact
-   spot), flash, and watch the LEDs / `RESULT,...` UART lines / BLE notify
-   characteristic track the beacon's distance live.
-5. **Measure** — fill in `results/accuracy_report.md` with real numbers
-   (accuracy, inference latency, flash/RAM) and record `results/demo.gif`.
+**What's solid:** firmware builds and flashes cleanly (`scanner_app`:
+83KB flash/22KB RAM, `inference_app`: 166KB flash/29KB RAM), data
+collection pipeline works (including handling phone BLE MAC rotation),
+training + INT8 weight extraction is scripted (`model/train.py` +
+`model/extract_weights.py`), and the trained model runs on-device with a
+hand-rolled INT8 forward pass (no TFLite Micro dependency - see
+`firmware/inference_app/src/inference.c`).
+
+**What's still needed before quoting a real accuracy number:** all 850
+samples came from one session in one room. Per the original data
+collection checklist (`dataset/README.md`), collect several more sessions
+across different rooms/orientations, then:
+```bash
+cd data_collection
+python log_to_csv.py --list-devices --port COM3   # find current beacon MAC (it rotates)
+python log_to_csv.py --port COM3 --mac <MAC> --bucket near --session room2_run1 --seconds 45
+# ...repeat for mid/far, multiple rooms
+
+cd ../model
+python train.py             # now uses a proper session-held-out split automatically
+python extract_weights.py   # regenerates firmware/inference_app/src/model_weights.c
+```
+Then rebuild+reflash `inference_app` and update
+`results/accuracy_report.md` with the new numbers. Also still open:
+record `results/demo.gif`.
 
 ## Resume bullet (template — fill in X/Y from `results/accuracy_report.md`)
 

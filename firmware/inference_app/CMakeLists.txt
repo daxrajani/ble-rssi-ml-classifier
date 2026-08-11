@@ -7,14 +7,12 @@ target_sources(app PRIVATE
     src/main.c
     src/scanner.c
     src/inference.c
+    src/model_weights.c
     src/leds.c
     src/ble_result_svc.c
 )
 
-# Once you export a model as a Zephyr/NCS library from Edge Impulse (or
-# build model_int8.tflite yourself with TFLite Micro), add it here, e.g.:
-#
-#   add_subdirectory(edge_impulse_sdk)
-#   target_link_libraries(app PRIVATE edge_impulse_sdk)
-#
-# See src/inference.c for the single function to wire it into.
+# Model is a hand-rolled INT8 dense-layer forward pass over weights
+# extracted from model/model_int8.tflite (see src/model_weights.c and the
+# comment at the top of src/inference.c for why this isn't TFLite Micro).
+# Regenerate src/model_weights.c after retraining - see model/README.md.
