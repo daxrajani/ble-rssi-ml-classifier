@@ -5,30 +5,30 @@
 
 #include "model_weights.h"
 
-const float model_feature_mean[3] = { -73.75196075f, -73.75771332f, 1.217952847f };
-const float model_feature_std[3]  = { 5.0278368f, 4.780543327f, 1.113464832f };
+const float model_feature_mean[3] = { -73.75196075f, -73.75395203f, 1.508615494f };
+const float model_feature_std[3]  = { 5.0278368f, 4.66024065f, 1.242407441f };
 
-const float model_input_scale = 0.02214860357f;
-const int32_t model_input_zero_point = -37;
+const float model_input_scale = 0.03244039416f;
+const int32_t model_input_zero_point = -71;
 
 /* Layer 1: 3 -> 8, ReLU */
-static const int8_t l1_weights[24] = {66, 127, -111, -50, 127, 65, 100, 127, 8, -32, -88, 127, 115, 127, -57, 85, -22, -127, -69, -127, 5, 58, 127, 61};
-static const int32_t l1_bias[8] = {4473, 2529, -3220, 1180, -150, 2029, 1014, -2536};
-static const float l1_weight_scales[8] = {0.006268044934f, 0.008461474441f, 0.00749329431f, 0.006170054898f, 0.006724836305f, 0.006582790986f, 0.009417418391f, 0.005973126739f};
-const float l1_act_scale = 0.02367488854f;
+static const int8_t l1_weights[24] = {-127, 26, -81, -127, -60, 24, 21, -127, -124, -19, -127, 59, 127, 115, 47, 127, 45, -68, -127, 109, 61, -12, 127, 27};
+static const int32_t l1_bias[8] = {2575, 610, 4359, 1243, -22, 884, -560, 2425};
+static const float l1_weight_scales[8] = {0.007261885796f, 0.006498846225f, 0.004901304841f, 0.00774505781f, 0.008190944791f, 0.00839486625f, 0.004335574806f, 0.008916405961f};
+const float l1_act_scale = 0.03368854895f;
 const int32_t l1_act_zero_point = -128;
 
 /* Layer 2: 8 -> 8, ReLU */
-static const int8_t l2_weights[64] = {-29, 10, 125, 24, 22, 7, 121, 127, 18, 117, 119, 75, 89, -16, -109, 127, 116, 74, -77, -41, 13, -127, 83, -98, 39, -124, 52, -81, -127, -47, 14, 122, 124, 127, 19, 62, 69, 88, -65, -65, -127, 19, -37, 35, 77, 16, 95, 35, -82, -127, -81, -24, -48, -27, 80, -73, -26, -116, 64, 63, 68, -21, 127, -14};
-static const int32_t l2_bias[8] = {-22, -3055, 524, -295, 3269, 1366, -113, 753};
-static const float l2_weight_scales[8] = {0.008557541296f, 0.00571972644f, 0.003897808725f, 0.004518433474f, 0.006930848584f, 0.005877620075f, 0.006229632068f, 0.005206585396f};
-const float l2_act_scale = 0.04313766956f;
+static const int8_t l2_weights[64] = {-73, 55, 114, 118, 15, -104, 127, 27, -127, -101, 124, 97, 7, -68, 86, -23, -127, -5, -95, 57, 57, 62, -5, 86, -30, -64, -19, 113, -70, -6, -127, 22, 48, -8, 87, -91, -30, 127, -5, 106, 7, -3, 5, -26, 91, -12, 52, 127, 120, 109, 8, 57, 33, -39, -64, -127, -112, -71, -50, 22, 32, -49, 127, -52};
+static const int32_t l2_bias[8] = {153, -1051, -558, 184, 3368, 964, -422, -829};
+static const float l2_weight_scales[8] = {0.005333176814f, 0.004104533698f, 0.01095979754f, 0.005632106215f, 0.007679581176f, 0.009427763522f, 0.00712406775f, 0.003964781761f};
+const float l2_act_scale = 0.05367370695f;
 const int32_t l2_act_zero_point = -128;
 
 /* Layer 3: 8 -> 3, no activation (argmax of logits == argmax of softmax) */
-static const int8_t l3_weights[24] = {50, 87, -102, -81, 18, -18, -127, -49, -127, -76, 70, -11, 86, -112, -114, -11, 19, -35, -11, -38, -127, 64, 1, 88};
-static const int32_t l3_bias[3] = {-1071, 1270, -507};
-static const float l3_weight_scales[3] = {0.007924772799f, 0.008217817172f, 0.009911746718f};
+static const int8_t l3_weights[24] = {78, -46, 127, -106, -24, 66, -115, -47, -96, 30, -82, 68, 59, 45, -127, -23, 101, 4, -79, 16, -84, -127, 98, 28};
+static const int32_t l3_bias[3] = {-1039, 930, -332};
+static const float l3_weight_scales[3] = {0.007908917032f, 0.009380440228f, 0.00803366024f};
 
 const struct model_weights g_model_weights = {
 	.l1_w = l1_weights, .l1_b = l1_bias, .l1_w_scales = l1_weight_scales,

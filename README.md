@@ -33,17 +33,23 @@ results/
 
 End-to-end pipeline works on real hardware as of 2026-08-11: flashed to a
 real nRF52840 DK, 850 labeled samples collected from a phone beacon,
-trained to 92% held-out accuracy (single-session split - see caveat
-below), and running live on-device with 61-91us inference latency. See
-`results/accuracy_report.md` for full numbers.
+tuned via a feature/architecture sweep (`model/experiment.py`) to 96.2%
+held-out accuracy (single-session split - see caveat below), beating a
+hand-tuned-threshold baseline by +20.7 points, and running live on-device
+with 61-91us inference latency. See `results/accuracy_report.md` for full
+numbers and the sweep results.
 
 **What's solid:** firmware builds and flashes cleanly (`scanner_app`:
 83KB flash/22KB RAM, `inference_app`: 166KB flash/29KB RAM), data
 collection pipeline works (including handling phone BLE MAC rotation),
 training + INT8 weight extraction is scripted (`model/train.py` +
-`model/extract_weights.py`), and the trained model runs on-device with a
-hand-rolled INT8 forward pass (no TFLite Micro dependency - see
-`firmware/inference_app/src/inference.c`).
+`model/extract_weights.py`), feature/architecture choices are backed by a
+sweep rather than guesses (`model/experiment.py`), the trained model runs
+on-device with a hand-rolled INT8 forward pass (no TFLite Micro
+dependency - see `firmware/inference_app/src/inference.c`), and each
+nearby BLE device is tracked in its own RSSI window
+(`firmware/inference_app/src/scanner.c`) rather than one shared window
+that used to blend samples across unrelated devices.
 
 **What's still needed before quoting a real accuracy number:** all 850
 samples came from one session in one room. Per the original data

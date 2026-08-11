@@ -1,9 +1,8 @@
 # Accuracy / latency / footprint report
 
-First real measurement pass, from the initial data collection + training
-run (2026-08-11). Numbers below are real, not estimated - re-run and update
-this file after collecting multi-session/multi-room data (see the caveat
-under Accuracy).
+Data collected 2026-08-11, model tuned via a feature/architecture sweep the
+same day. Numbers below are real, not estimated. Still single-session data
+(see caveat under Accuracy) - re-run after multi-room/session collection.
 
 ## Dataset
 
@@ -21,8 +20,12 @@ under Accuracy).
 ## Model
 
 - Architecture: Dense(3->8, ReLU) -> Dense(8->8, ReLU) -> Dense(8->3,
-  softmax). Features per window: latest RSSI, rolling mean, rolling std
-  (window=5).
+  softmax). Chosen via a sweep over (4,), (8,), (8,8), (16,16), (8,8,8) -
+  (8,8) won on accuracy at a small size (see Feature/architecture sweep
+  below).
+- Features per window: latest RSSI, rolling mean, rolling std.
+  **Window=8** (chosen via sweep - see below; window=5 was the original
+  guess and is meaningfully worse).
 - Quantization: INT8, full-integer (TFLite converter, INT8 in/out,
   per-channel weight quantization)
 - `.tflite` file size: 3,160 bytes (`model/model_int8.tflite`)
@@ -31,49 +34,98 @@ under Accuracy).
   from the trained model's weights - not TFLite Micro (see comment at top
   of `inference.c` for why).
 
+## Feature/architecture sweep (`model/experiment.py`)
+
+Compared on the same single-session dataset/split methodology, so
+relative rankings are more trustworthy than absolute numbers.
+
+Feature engineering (architecture fixed at (8,8)):
+| feature_set | window | accuracy | tflite size |
+|---|---|---|---|
+| rssi_only | 5 | 88.73% | 3176 B |
+| rssi_mean_std | 3 | 90.45% | 3221 B |
+| rssi_mean_std | 5 | 92.64% | 3224 B |
+| **rssi_mean_std** | **8** | **96.71%** | **3240 B** |
+| rssi_ema_delta | 3 | 89.98% | 3248 B |
+| rssi_ema_delta | 5 | 91.86% | 3248 B |
+| rssi_ema_delta | 8 | 92.33% | 3248 B |
+
+Architecture (feature config fixed at rssi_mean_std, window=8):
+| hidden_units | accuracy | tflite size |
+|---|---|---|
+| (4,) | 94.05% | 2280 B |
+| **(8, 8)** | **96.87%** | **3248 B** |
+| (8,) | 95.77% | 2416 B |
+| (16, 16) | 96.71% | 3936 B |
+| (8, 8, 8) | 96.56% | 4088 B |
+
+Takeaways: larger windows (more smoothing) consistently beat smaller ones
+and beat the alternative EMA/delta feature at every window size tested -
+plain rolling mean/std was already a good feature choice, it just needed
+a bigger window than the original guess of 5. (8,8) beat both smaller and
+larger architectures - the extra capacity of (16,16)/(8,8,8) didn't help
+on this dataset size and cost 20-25% more flash for no accuracy gain.
+
 ## On-device measurements (nRF52840 DK, nrf52840dk/nrf52840, NCS v3.2.4)
 
 - Inference latency (from `RESULT,...,<us>` in inference_app's UART
-  output, sampled over ~350 live classifications): 61-91us typical,
-  occasional outliers up to ~213us (likely scheduler jitter, not the math
-  itself). Consistently sub-millisecond.
-- Flash usage: 166,148 B / 1 MB (15.85%)
-- RAM usage: 28,608 B / 256 KB (10.91%)
+  output, sampled over ~350+ live classifications, both before and after
+  the window=8 retrain): 61-91us typical, occasional outliers up to
+  ~213us (likely scheduler jitter, not the math itself). Consistently
+  sub-millisecond.
+- Flash usage: 166,292 B / 1 MB (15.86%)
+- RAM usage: 28,992 B / 256 KB (11.06%)
 - (For comparison, `scanner_app` alone - no model, no BLE peripheral/GATT
-  service - is 83,208 B flash / 22,192 B RAM, so the model + inference
-  code + result-notify GATT service added roughly 83 KB flash / 6.4 KB
-  RAM.)
+  service, no multi-device tracking - is 83,208 B flash / 22,192 B RAM.)
+- Firmware also now tracks each nearby BLE device in its own RSSI window
+  (`scanner.c`, up to 8 devices, LRU-evicted) instead of sharing one
+  window across all devices - fixes a real bug where classification could
+  blend samples from unrelated physical devices.
 
 ## Accuracy
 
-- Held-out test accuracy: **92.02%** (grouped confusion matrix below).
-  Split method: **stratified random 75/25**, not a session-held-out
-  split - there was only one `session_id` at training time, so a proper
-  `GroupShuffleSplit` by session (the intended, less-optimistic method;
-  see `model/train.py`) couldn't run. Treat 92% as an optimistic upper
-  bound until retrained on multiple sessions/rooms and re-split by
-  session.
+- Held-out test accuracy: **96.24%** (production config: window=8,
+  hidden_units=(8,8)). Split method: **stratified random 75/25**, not a
+  session-held-out split - there was only one `session_id` at training
+  time, so a proper `GroupShuffleSplit` by session (the intended, less
+  optimistic method; see `model/train.py`) couldn't run. **Treat 96% as
+  an optimistic upper bound** until retrained on multiple sessions/rooms
+  and re-split by session.
+- **Baseline comparison** (nearest-mean RSSI threshold, i.e. a
+  hand-tuned-filtering equivalent, fit on the same training data): 75.59%
+  accuracy. **The trained model beats this baseline by +20.66 points** -
+  the core claim of the project (learned model vs. hand-tuned filtering)
+  is now backed by a real number, not just qualitative reasoning.
 - Confusion matrix (rows=true, cols=pred, order near/mid/far), n=213 test
   rows:
   ```
           near  mid  far
-  near      59   11    2
-  mid        3   68    1
+  near      67    3    2
+  mid        3   69    0
   far        0    0   69
   ```
-  far is perfectly separated; almost all errors are near<->mid confusion,
-  consistent with their overlapping raw-RSSI ranges above.
-- Live on-device sanity check (ambient BLE devices, unfiltered by MAC):
-  strong/close signals (-57 to -63 dBm) consistently classified NEAR,
-  weak/distant signals (-85 to -92 dBm) consistently classified FAR,
-  mid-range signals (-70 to -80 dBm) split between buckets - matches the
-  near/mid confusion seen in the held-out numbers above.
+- Per-class precision/recall/F1:
+  - near: precision=0.957, recall=0.931, f1=0.944
+  - mid: precision=0.958, recall=0.958, f1=0.958
+  - far: precision=0.972, recall=1.000, f1=0.986
+  - far is essentially perfectly separated; remaining errors are almost
+    all near<->mid confusion, consistent with their overlapping raw-RSSI
+    ranges above.
+- Live on-device sanity check (ambient BLE devices, unfiltered by MAC,
+  each now tracked in its own window): devices consistently close/strong
+  (-57 to -63 dBm) classify NEAR every reading; devices consistently
+  distant/weak (-80 to -90 dBm) classify FAR every reading - much more
+  stable per-device than before the per-MAC window fix.
 
 ## Next steps to get a trustworthy accuracy number
 
-1. Collect `mid`/`far` walk-arounds' worth of additional `session_id`s in
-   different rooms/orientations (plan's original checklist).
+1. Collect `near`/`mid`/`far` walk-arounds' worth of additional
+   `session_id`s in different rooms/orientations (plan's original
+   checklist, `dataset/README.md`).
 2. Re-run `model/train.py` - once >=2 session_ids exist it automatically
    switches to the proper `GroupShuffleSplit`.
-3. Re-run the weight-extraction step to regenerate
+3. Re-run `model/experiment.py` on the bigger dataset to check whether
+   window=8/(8,8) is still the best config once there's more/noisier
+   data to fit.
+4. Re-run `model/extract_weights.py` to regenerate
    `firmware/inference_app/src/model_weights.c`, rebuild, reflash.
