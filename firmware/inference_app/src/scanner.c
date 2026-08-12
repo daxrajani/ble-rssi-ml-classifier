@@ -86,8 +86,21 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	dev->last_seen_ms = k_uptime_get();
 	push_sample(dev, (float)rssi);
 
+	/* dev->window is a circular buffer - classify_distance() needs it in
+	 * chronological order (it reads index [n-1] as "the sample just
+	 * pushed"), so reorder into a small stack copy before calling. Only
+	 * INFERENCE_WINDOW_LEN elements, negligible cost next to the
+	 * inference itself.
+	 */
+	float ordered[INFERENCE_WINDOW_LEN];
+	for (size_t k = 0; k < dev->window_len; k++) {
+		size_t idx = (dev->window_pos + INFERENCE_WINDOW_LEN - dev->window_len + k) %
+			     INFERENCE_WINDOW_LEN;
+		ordered[k] = dev->window[idx];
+	}
+
 	uint32_t t0 = k_cycle_get_32();
-	enum distance_bucket bucket = classify_distance(dev->window, dev->window_len);
+	enum distance_bucket bucket = classify_distance(ordered, dev->window_len);
 	uint32_t t1 = k_cycle_get_32();
 	uint32_t inference_us = k_cyc_to_us_floor32(t1 - t0);
 

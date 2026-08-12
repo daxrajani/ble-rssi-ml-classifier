@@ -81,6 +81,20 @@ on this dataset size and cost 20-25% more flash for no accuracy gain.
   (`scanner.c`, up to 8 devices, LRU-evicted) instead of sharing one
   window across all devices - fixes a real bug where classification could
   blend samples from unrelated physical devices.
+- Second real bug found and fixed via `model/verify_inference/` (see that
+  folder's README): `scanner.c` was passing its circular RSSI buffer to
+  `classify_distance()` unordered, so the "latest RSSI" feature was stale
+  up to 87.5% of the time once a device had been tracked past its first 8
+  readings (mean/std features were unaffected - order-independent).
+  Fixed by reordering into a chronological copy before classification;
+  rebuilt and reflashed.
+- Independently verified `inference.c`'s INT8 algorithm against the
+  official TFLite interpreter on all 850 dataset windows: **98.71%
+  agreement**. The 11 disagreements are all near-class-boundary cases,
+  consistent with `inference.c`'s documented float-based requantization
+  choice (vs. TFLite's internal fixed-point kernels) - an intentional
+  simplicity tradeoff (the nRF52840 has an FPU), not a bug. See
+  `model/verify_inference/README.md` for the full methodology.
 
 ## Accuracy
 
