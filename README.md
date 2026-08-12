@@ -36,8 +36,11 @@ real nRF52840 DK, 850 labeled samples collected from a phone beacon,
 tuned via a feature/architecture sweep (`model/experiment.py`) to 96.2%
 held-out accuracy (single-session split - see caveat below), beating a
 hand-tuned-threshold baseline by +20.7 points, and running live on-device
-with 61-91us inference latency. See `results/accuracy_report.md` for full
-numbers and the sweep results.
+with 61-91us inference latency. Also compared against the plan's original
+recommended path (Edge Impulse's web UI) on the same dataset: essentially
+tied on accuracy (95.3% vs. 96.2%), with the hand-rolled path smaller and
+faster. See `results/accuracy_report.md` for full numbers and both
+comparisons.
 
 **What's solid:** firmware builds and flashes cleanly (`scanner_app`:
 83KB flash/22KB RAM, `inference_app`: 166KB flash/29KB RAM), data

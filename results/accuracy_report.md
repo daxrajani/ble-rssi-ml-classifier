@@ -117,6 +117,54 @@ on this dataset size and cost 20-25% more flash for no accuracy gain.
   distant/weak (-80 to -90 dBm) classify FAR every reading - much more
   stable per-device than before the per-MAC window fix.
 
+## Edge Impulse comparison (2026-08-11)
+
+The project plan's primary recommended path (upload CSV to Edge Impulse's
+web UI, let their DSP+NN pipeline auto-build a model) was run as a
+comparison against the hand-rolled `train.py`/`extract_weights.py` path
+actually used above. Same dataset (`dataset/rssi_samples.csv`, reshaped
+into per-bucket recordings for their CSV Wizard - see
+`dataset/export_edge_impulse.py`), same nRF52840 DK target device.
+
+- **Data ingestion gotcha**: Edge Impulse's plain CSV upload silently
+  discarded our real per-row timestamps and assumed a fixed ~250-333Hz
+  sample rate unless routed through their **CSV Wizard** with the
+  timestamp column explicitly mapped as "elapsed milliseconds" - worth
+  knowing if you try this yourself, the error is silent (wrong recording
+  length shown, not a rejected upload).
+- **Impulse config**: window=2136ms / stride=500ms (≈8 raw samples/window,
+  matching our own window=8), Flatten DSP block (avg/RMS/std-dev/skewness/
+  kurtosis - close to but richer than our mean/std), Classification
+  (Keras) learning block, EI's default architecture (Dense 20 → Dense 10,
+  vs. our swept (8,8)).
+- **Normalization mattered a lot**: first run, EI's default "don't
+  normalize data" gave only **42.6%** accuracy. Switching to "Normalize
+  using scikit-learn's StandardScaler" (equivalent to what `train.py`
+  already does) jumped it to **95.3%** - a reminder that an unfair
+  comparison (normalized vs. not) would have wrongly made this project's
+  approach look far better than it is.
+- **Result, apples-to-apples (both normalized, both INT8 quantized)**:
+
+  | | This project (train.py) | Edge Impulse |
+  |---|---|---|
+  | Accuracy | 96.24% (window=8, (8,8)) | 95.3% (window≈8, Dense 20→10) |
+  | far / mid / near F1 | 0.986 / 0.958 / 0.944 | 0.97 / 0.93 / 0.95 |
+  | Model size | 3,160 B (.tflite) | 14.5 KB flash (EON Compiler estimate) |
+  | Peak RAM | n/a (compiled into inference.c) | 1.4 KB |
+  | Inference latency | 61-91us (measured live on DK) | 1 ms (EON Compiler estimate, not yet measured live) |
+
+  Essentially tied on accuracy. Our hand-rolled path is meaningfully
+  smaller and faster - expected, since Edge Impulse's default Dense
+  20→10 network and 5-statistic Flatten block have more capacity than
+  necessary for a 3-class problem on this little data, while our sweep
+  (`model/experiment.py`) specifically searched for the smallest
+  architecture that didn't lose accuracy.
+- **Not done**: exporting/flashing the Edge Impulse model to actually
+  measure its on-device latency/footprint on the DK (the 1ms/1.4KB/14.5KB
+  numbers above are Edge Impulse's own EON Compiler estimates, not a live
+  measurement like our 61-91us number is). Their deployment page has a
+  direct "nRF Connect SDK" export if this comparison needs to go further.
+
 ## Next steps to get a trustworthy accuracy number
 
 1. Collect `near`/`mid`/`far` walk-arounds' worth of additional
