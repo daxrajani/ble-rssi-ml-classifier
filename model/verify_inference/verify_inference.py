@@ -3,15 +3,13 @@
 Verifies firmware/inference_app/src/inference.c's INT8 forward-pass
 algorithm against the official TFLite interpreter on real dataset
 windows. This is an independent Python transcription of inference.c's
-logic (quantize -> 3x dense_layer -> argmax), not a copy-paste, so
-agreement between the two is real evidence the C algorithm is correct -
-not just self-consistent.
+logic (quantize -> 2x dense_layer -> dense_layer_logits -> argmax over
+float logits), not a copy-paste, so agreement between the two is real
+evidence the C algorithm is correct - not just self-consistent.
 
-(Note: a native compile-and-run of the actual inference.c was attempted
-first - stronger evidence than a reimplementation - but this machine's
-Visual Studio install has the compiler without the Windows SDK headers,
-so that wasn't possible without a large SDK download. This script is the
-fallback.)
+The shipped inference.c is additionally built and run natively by
+test_main.c (see README.md in this folder), whose predictions match this
+script's port window for window.
 
 Usage: python verify_inference.py
 """
@@ -46,6 +44,23 @@ def dense_layer(inp, in_zp, in_scale, w, bias, w_scales, out_scale, out_zp, relu
     return out
 
 
+def dense_layer_logits(inp, in_zp, in_scale, w, bias, w_scales):
+    """Final layer: dequantized float logits, no requantization (mirrors
+    dense_layer_logits() in inference.c). Argmax over these is valid because
+    softmax is monotonic, and keeping them as floats avoids rounding close
+    logits to the same integer."""
+    out_len = w.shape[0]
+    in_len = w.shape[1]
+    logits = np.zeros(out_len, dtype=np.float64)
+    for c in range(out_len):
+        acc = 0
+        for i in range(in_len):
+            acc += (int(inp[i]) - in_zp) * int(w[c, i])
+        combined = in_scale * w_scales[c]
+        logits[c] = acc * combined + bias[c] * combined
+    return logits
+
+
 def classify_distance_c_port(rssi_window, weights):
     """Direct transcription of inference.c's classify_distance()."""
     n = len(rssi_window)
@@ -62,9 +77,8 @@ def classify_distance_c_port(rssi_window, weights):
     a2 = dense_layer(a1, weights["l1_act_zp"], weights["l1_act_scale"],
                       weights["l2_w"], weights["l2_b"], weights["l2_w_scales"],
                       weights["l2_act_scale"], weights["l2_act_zp"], relu=True)
-    logits = dense_layer(a2, weights["l2_act_zp"], weights["l2_act_scale"],
-                          weights["l3_w"], weights["l3_b"], weights["l3_w_scales"],
-                          out_scale=1.0, out_zp=0, relu=False)
+    logits = dense_layer_logits(a2, weights["l2_act_zp"], weights["l2_act_scale"],
+                                 weights["l3_w"], weights["l3_b"], weights["l3_w_scales"])
     return int(np.argmax(logits))
 
 

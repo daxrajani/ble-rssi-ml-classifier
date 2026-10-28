@@ -89,12 +89,17 @@ on this dataset size and cost 20-25% more flash for no accuracy gain.
   Fixed by reordering into a chronological copy before classification;
   rebuilt and reflashed.
 - Independently verified `inference.c`'s INT8 algorithm against the
-  official TFLite interpreter on all 850 dataset windows: **98.71%
-  agreement**. The 11 disagreements are all near-class-boundary cases,
-  consistent with `inference.c`'s documented float-based requantization
-  choice (vs. TFLite's internal fixed-point kernels) - an intentional
-  simplicity tradeoff (the nRF52840 has an FPU), not a bug. See
-  `model/verify_inference/README.md` for the full methodology.
+  official TFLite interpreter on all 850 dataset windows: **99.65%
+  agreement (847/850)**. An earlier 98.71% (839/850) figure included a
+  real precision bug in the final layer (logits were requantized at scale
+  1.0 and clamped to INT8, so close logits rounded to the same integer);
+  `inference.c` now takes argmax over dequantized float logits, which
+  cut the disagreements from 11 to 3. The remaining 3 are near-class-boundary
+  windows, consistent with the documented float-based requantization of
+  hidden layers (vs. TFLite's fixed-point kernels) - an intentional
+  simplicity tradeoff (the nRF52840 has an FPU). The shipped `inference.c`
+  was also built natively with GCC and matched the Python port on all 850
+  windows. See `model/verify_inference/README.md` for the full methodology.
 
 ## Accuracy
 

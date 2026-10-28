@@ -1,26 +1,42 @@
 /*
- * INT8 forward pass for the trained distance-bucket classifier
- * (model/train.py -> model_int8.tflite -> model_weights.c).
+ * INT8 forward pass for the distance-bucket classifier.
  *
- * This hand-rolled implementation exists instead of linking TFLite Micro:
- * the model is tiny (3 -> 8 -> 8 -> 3, ~800 params) and this NCS workspace
- * doesn't have a tflite-micro west module set up, so pulling in the full
- * C++ runtime would be a much bigger, riskier change than writing the
- * handful of lines of quantized-dense-layer math this model actually
- * needs. The nRF52840 is a Cortex-M4F with a hardware FPU, so the
- * requantization step uses plain float math (multiply by the real scale)
- * rather than TFLM's fixed-point-multiplier approximation for FPU-less
- * targets - simpler and at least as accurate here.
+ * What this file does
+ *   Runs a quantized 3 -> 8 -> 8 -> 3 fully-connected network on a Cortex-M4F
+ *   (nRF52840). Input is a short window of RSSI samples; the three features
+ *   (latest RSSI, window mean, window standard deviation) are standardized,
+ *   quantized to INT8, pushed through two ReLU dense layers, and a final
+ *   linear layer whose argmax selects NEAR / MID / FAR. Weights and
+ *   quantization parameters live in model_weights.c, generated from
+ *   model/model_int8.tflite by model/extract_weights.py.
  *
- * Quantization scheme matches TFLite's standard per-channel-weight /
- * per-tensor-activation INT8 scheme:
+ * Why a dedicated implementation instead of the TFLite Micro runtime
+ *   The model has 131 parameters (112 weights, 19 biases). At that size a
+ *   purpose-built forward pass is smaller than the interpreter, arena
+ *   allocator and kernel registry TFLM would pull in, has no C++ runtime
+ *   dependency, and is short enough to verify line by line against the
+ *   reference implementation.
+ *
+ * Quantization scheme (TFLite-compatible)
  *   real_value = scale * (quantized_value - zero_point)
- * Weights use zero_point 0 (symmetric); activations/inputs don't.
+ *   Weights are per-output-channel symmetric (zero_point 0). Activations and
+ *   the network input are per-tensor asymmetric. Biases are INT32 with
+ *   scale = input_scale * weight_scale[channel], so they fold directly into
+ *   the INT32 accumulator.
  *
- * The final layer has no activation before softmax in the trained model,
- * but softmax is monotonic, so argmax of the pre-softmax INT8 logits
- * equals argmax of the true softmax probabilities - softmax itself is
- * never evaluated on-device.
+ * Why float requantization
+ *   TFLM requantizes with fixed-point multiplier/shift pairs so it can run on
+ *   cores without an FPU. The Cortex-M4F has a single-precision hardware FPU,
+ *   so scaling the INT32 accumulator by the real-valued combined scale is
+ *   both simpler and at least as accurate as the fixed-point approximation.
+ *
+ * Verification
+ *   - model/verify_inference/verify_inference.py is an independent Python
+ *     port of this algorithm, checked against the official TFLite
+ *     interpreter on every window in the dataset.
+ *   - model/verify_inference/test_main.c builds this exact file natively
+ *     (it is pure C with no Zephyr dependency, deliberately) and replays the
+ *     dataset through classify_distance().
  */
 
 #include "inference.h"
@@ -28,77 +44,186 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-static int8_t quantize(float real_value, float scale, int32_t zero_point)
+/* The enum and the model must agree on the number of real classes:
+ * DIST_UNKNOWN is the first value past the last class the network can emit.
+ */
+_Static_assert(DIST_UNKNOWN == MODEL_NUM_CLASSES,
+	       "enum distance_bucket and MODEL_NUM_CLASSES have drifted apart");
+
+/**
+ * Clamp a 32-bit value into the signed 8-bit range.
+ *
+ * @param v  Value to saturate.
+ * @return   v limited to [INT8_MIN, INT8_MAX].
+ */
+static int8_t saturate_int8(int32_t v)
 {
-	int32_t q = (int32_t)lroundf(real_value / scale) + zero_point;
-
-	if (q > 127) {
-		q = 127;
-	} else if (q < -128) {
-		q = -128;
+	if (v > INT8_MAX) {
+		return INT8_MAX;
 	}
-	return (int8_t)q;
+	if (v < INT8_MIN) {
+		return INT8_MIN;
+	}
+	return (int8_t)v;
 }
 
-/* One INT8 dense layer: out[c] = sum_i (in[i]-in_zp) * w[c][i] * (in_scale*w_scale[c]) + bias_real[c],
- * requantized into out_scale/out_zp, optionally ReLU-clamped.
+/**
+ * Quantize a real value to INT8: q = round(real / scale) + zero_point.
+ *
+ * @param real_value  Value to quantize.
+ * @param scale       Tensor scale; must be non-zero.
+ * @param zero_point  Tensor zero point.
+ * @return            Quantized value, saturated to INT8.
  */
-static void dense_layer(const int8_t *in, int32_t in_zp, float in_scale, int in_len,
-			 const int8_t *w, const int32_t *bias, const float *w_scales,
-			 float out_scale, int32_t out_zp, int out_len,
-			 bool relu, int8_t *out)
+static int8_t quantize(float real_value, float scale, int32_t zero_point)
 {
-	for (int c = 0; c < out_len; c++) {
-		int32_t acc = 0;
+	return saturate_int8((int32_t)lroundf(real_value / scale) + zero_point);
+}
 
-		for (int i = 0; i < in_len; i++) {
-			acc += (int32_t)(in[i] - in_zp) * (int32_t)w[c * in_len + i];
-		}
+/**
+ * Compute one output channel of a dense layer as a real (float) value:
+ *   sum_i (in[i] - in_zp) * w[c][i] * (in_scale * w_scale[c])
+ *     + bias[c] * (in_scale * w_scale[c])
+ *
+ * The combined scale is computed once per channel and applied to both the
+ * accumulator and the bias.
+ *
+ * @param in        Input activations, in_len INT8 values.
+ * @param in_zp     Input zero point.
+ * @param in_scale  Input scale.
+ * @param in_len    Number of inputs.
+ * @param w         Weights, row-major [out_len][in_len], INT8, zero point 0.
+ * @param bias      INT32 biases, one per output channel.
+ * @param w_scales  Per-output-channel weight scales.
+ * @param c         Output channel index to compute.
+ * @return          Dequantized pre-activation value for channel c.
+ */
+static float dense_channel_real(const int8_t *in, int32_t in_zp, float in_scale, size_t in_len,
+				const int8_t *w, const int32_t *bias, const float *w_scales,
+				size_t c)
+{
+	const float combined_scale = in_scale * w_scales[c];
+	int32_t acc = 0;
 
-		float real = (float)acc * (in_scale * w_scales[c]) +
-			     (float)bias[c] * (in_scale * w_scales[c]);
+	for (size_t i = 0; i < in_len; i++) {
+		acc += (int32_t)(in[i] - in_zp) * (int32_t)w[c * in_len + i];
+	}
+
+	return (float)acc * combined_scale + (float)bias[c] * combined_scale;
+}
+
+/**
+ * One INT8 dense layer with INT8 output, for hidden layers.
+ * Each channel is dequantized, optionally ReLU-clamped at the output zero
+ * point (the quantized representation of 0.0), and requantized.
+ *
+ * @param in         Input activations, in_len INT8 values.
+ * @param in_zp      Input zero point.
+ * @param in_scale   Input scale.
+ * @param in_len     Number of inputs.
+ * @param w          Weights, row-major [out_len][in_len].
+ * @param bias       INT32 biases, one per output channel.
+ * @param w_scales   Per-output-channel weight scales.
+ * @param out_scale  Output tensor scale; must be non-zero.
+ * @param out_zp     Output tensor zero point.
+ * @param out_len    Number of outputs.
+ * @param relu       Clamp negative results to zero before saturating.
+ * @param out        Destination, out_len INT8 values.
+ */
+static void dense_layer(const int8_t *in, int32_t in_zp, float in_scale, size_t in_len,
+			const int8_t *w, const int32_t *bias, const float *w_scales,
+			float out_scale, int32_t out_zp, size_t out_len,
+			bool relu, int8_t *out)
+{
+	for (size_t c = 0; c < out_len; c++) {
+		float real = dense_channel_real(in, in_zp, in_scale, in_len, w, bias, w_scales, c);
 		int32_t q = (int32_t)lroundf(real / out_scale) + out_zp;
 
 		if (relu && q < out_zp) {
 			q = out_zp;
 		}
-		if (q > 127) {
-			q = 127;
-		} else if (q < -128) {
-			q = -128;
-		}
-		out[c] = (int8_t)q;
+		out[c] = saturate_int8(q);
 	}
 }
 
+/**
+ * Final dense layer, producing float logits instead of INT8 activations.
+ *
+ * The logits are only ever compared against each other, so they are kept as
+ * dequantized floats rather than requantized to INT8. Requantizing at a
+ * coarse scale would round nearby logits to the same integer (2.3 and 2.4
+ * both becoming 2) and let argmax pick the wrong class.
+ *
+ * @param in        Input activations, in_len INT8 values.
+ * @param in_zp     Input zero point.
+ * @param in_scale  Input scale.
+ * @param in_len    Number of inputs.
+ * @param w         Weights, row-major [out_len][in_len].
+ * @param bias      INT32 biases, one per output channel.
+ * @param w_scales  Per-output-channel weight scales.
+ * @param out_len   Number of logits.
+ * @param logits    Destination, out_len floats.
+ */
+static void dense_layer_logits(const int8_t *in, int32_t in_zp, float in_scale, size_t in_len,
+			       const int8_t *w, const int32_t *bias, const float *w_scales,
+			       size_t out_len, float *logits)
+{
+	for (size_t c = 0; c < out_len; c++) {
+		logits[c] = dense_channel_real(in, in_zp, in_scale, in_len, w, bias, w_scales, c);
+	}
+}
+
+/**
+ * Classify a window of RSSI samples into a distance bucket.
+ *
+ * Features are [latest RSSI, window mean, window standard deviation],
+ * matching the feature engineering in model/train.py.
+ *
+ * Preconditions: samples are in chronological order (most recent last).
+ * Callers keeping a circular buffer must linearize it first.
+ *
+ * @param rssi_window  RSSI samples in dBm, oldest first.
+ * @param n            Number of samples in rssi_window.
+ * @return             The predicted bucket, or DIST_UNKNOWN if rssi_window is
+ *                     NULL, n is 0, or the model's feature normalization is
+ *                     invalid (a zero standard deviation entry).
+ */
 enum distance_bucket classify_distance(const float *rssi_window, size_t n)
 {
-	if (n == 0) {
+	if (rssi_window == NULL || n == 0) {
 		return DIST_UNKNOWN;
 	}
 
-	/* Features: [latest rssi, rolling mean, rolling std] over the window -
-	 * must match the feature engineering in model/train.py.
-	 */
-	float sum = 0.0f, sum_sq = 0.0f;
+	float sum = 0.0f;
+	float sum_sq = 0.0f;
 
 	for (size_t i = 0; i < n; i++) {
 		sum += rssi_window[i];
 	}
-	float mean = sum / (float)n;
+	const float mean = sum / (float)n;
 
 	for (size_t i = 0; i < n; i++) {
-		float d = rssi_window[i] - mean;
+		const float d = rssi_window[i] - mean;
+
 		sum_sq += d * d;
 	}
-	float std = (n > 1) ? sqrtf(sum_sq / (float)n) : 0.0f;
+	/* Population standard deviation (divide by n, not n - 1) to match
+	 * numpy's default np.std used for the training features in model/train.py.
+	 */
+	const float std = (n > 1) ? sqrtf(sum_sq / (float)n) : 0.0f;
 
-	float raw[MODEL_NUM_FEATURES] = {rssi_window[n - 1], mean, std};
+	const float raw[MODEL_NUM_FEATURES] = {rssi_window[n - 1], mean, std};
 	int8_t q_in[MODEL_NUM_FEATURES];
 
-	for (int i = 0; i < MODEL_NUM_FEATURES; i++) {
-		float normalized = (raw[i] - model_feature_mean[i]) / model_feature_std[i];
+	for (size_t i = 0; i < MODEL_NUM_FEATURES; i++) {
+		if (model_feature_std[i] == 0.0f) {
+			return DIST_UNKNOWN;
+		}
+
+		const float normalized = (raw[i] - model_feature_mean[i]) / model_feature_std[i];
 
 		q_in[i] = quantize(normalized, model_input_scale, model_input_zero_point);
 	}
@@ -115,18 +240,19 @@ enum distance_bucket classify_distance(const float *rssi_window, size_t n)
 		    m->l2_w, m->l2_b, m->l2_w_scales, *m->l2_act_scale, *m->l2_act_zp,
 		    MODEL_L2_UNITS, true, a2);
 
-	/* Final layer: no requantization scale needed since we only need
-	 * argmax, not the actual probabilities - use a fixed nominal
-	 * scale/zero_point of 1.0/0 and skip clamping semantics that don't
-	 * matter for ordering.
+	/* The trained model ends in softmax, but softmax is strictly monotonic
+	 * across the class dimension, so the class with the largest pre-softmax
+	 * logit is also the class with the largest probability. Taking argmax
+	 * over the float logits therefore gives the same answer without
+	 * evaluating exp() on-device.
 	 */
-	int8_t logits[MODEL_NUM_CLASSES];
-	dense_layer(a2, *m->l2_act_zp, *m->l2_act_scale, MODEL_L2_UNITS,
-		    m->l3_w, m->l3_b, m->l3_w_scales, 1.0f, 0, MODEL_NUM_CLASSES,
-		    false, logits);
+	float logits[MODEL_NUM_CLASSES];
+	dense_layer_logits(a2, *m->l2_act_zp, *m->l2_act_scale, MODEL_L2_UNITS,
+			   m->l3_w, m->l3_b, m->l3_w_scales, MODEL_NUM_CLASSES, logits);
 
-	int best = 0;
-	for (int c = 1; c < MODEL_NUM_CLASSES; c++) {
+	size_t best = 0;
+
+	for (size_t c = 1; c < MODEL_NUM_CLASSES; c++) {
 		if (logits[c] > logits[best]) {
 			best = c;
 		}
@@ -134,6 +260,13 @@ enum distance_bucket classify_distance(const float *rssi_window, size_t n)
 	return (enum distance_bucket)best;
 }
 
+/**
+ * Human-readable name for a distance bucket.
+ *
+ * @param b  Bucket value.
+ * @return   Static string: "NEAR", "MID", "FAR", or "UNKNOWN" for any other
+ *           value. Never NULL.
+ */
 const char *distance_bucket_str(enum distance_bucket b)
 {
 	switch (b) {
